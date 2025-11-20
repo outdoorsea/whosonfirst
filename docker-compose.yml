@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgis/postgis:15-master
+    container_name: wof_postgis_db
+    environment:
+      POSTGRES_DB: ${DB_NAME:-wof}
+      POSTGRES_USER: ${DB_USER:-user}
+      POSTGRES_PASSWORD: ${DB_PASS:-password}
+    volumes:
+      - wof_db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432" # Expose for local access, e.g., for running import_wof_data.py
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-user} -d ${DB_NAME:-wof}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  wof-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wof_api_service
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-wof}
+      DB_USER: ${DB_USER:-user}
+      DB_PASS: ${DB_PASS:-password}
+    ports:
+      - "2000:8000"
+    volumes:
+      - ./wof_data:/app/wof_data
+      - ./static:/app/static
+    depends_on:
+      db:
+        condition: service_healthy
+    # Command to run the FastAPI app, overriding the Dockerfile's CMD for local dev
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  wof_db_data:

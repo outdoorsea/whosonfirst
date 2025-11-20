@@ -1,0 +1,28 @@
+# Terraform Variables Configuration
+# Copy this file to terraform.tfvars and fill in your values
+
+# AWS Configuration
+aws_region = "us-east-1"
+
+# Database Configuration
+db_name     = "wof"
+db_user     = "wofadmin"
+db_password = "CHANGE_THIS_TO_A_SECURE_PASSWORD" # Use a strong password!
+
+# Database Instance Settings (Production-Low)
+db_instance_type       = "db.t3.small"
+db_allocated_storage   = 50
+db_max_allocated_storage = 200
+
+# Network Configuration
+# You need to provide your existing VPC and subnet IDs
+# To find these, run: aws ec2 describe-vpcs
+#                     aws ec2 describe-subnets --filters "Name=vpc-id,Values=YOUR_VPC_ID"
+vpc_id = "vpc-xxxxxxxxxxxxxxxxx"  # Replace with your VPC ID
+subnet_ids = [
+  "subnet-xxxxxxxxxxxxxxxxx",  # Replace with your subnet IDs (need at least 2 in different AZs)
+  "subnet-yyyyyyyyyyyyyyyyy"
+]
+
+# Optional: ECR Configuration (for App Runner deployment)
+ecr_repository_name = "wof-api-service"

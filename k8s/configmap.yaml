@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wof-api-config
+  labels:
+    app: wof-api
+data:
+  DB_HOST: "wof-postgis.default.svc.cluster.local"
+  DB_PORT: "5432"
+  DB_NAME: "wof"
+  DB_MIN_CONNECTIONS: "1"
+  DB_MAX_CONNECTIONS: "10"
