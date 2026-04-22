@@ -58,3 +58,25 @@ Thumbs.db
 
 # Docker
 .dockerignore
+
+# Gas Town operational files (managed by submodule-gitignore plugin)
+.runtime/
+.logs/
+state.json
+config.json
+crew/
+polecats/
+refinery/
+witness/
+mayor/
+archive/
+.beads/.locks/
+.beads/locks/
+.beads/audit.log
+.beads/metadata.json
+.beads/PRIME.md
+.beads/.gt-types-configured
+.beads/backup/
+.beads/dolt-server.port
+.repo.git/
+.land-worktree/
