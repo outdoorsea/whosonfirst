@@ -354,6 +354,20 @@ def landing_page():
                 padding: 15px;
                 margin: 15px 0;
             }
+            .auth-banner {
+                background: #fff8e1;
+                border-left: 4px solid #f39c12;
+                padding: 15px 20px;
+                margin: 15px 0;
+                border-radius: 4px;
+            }
+            .auth-banner code {
+                background: #fdebc4;
+                padding: 2px 6px;
+                border-radius: 3px;
+                font-family: 'Courier New', monospace;
+                font-size: 0.9em;
+            }
             footer {
                 text-align: center;
                 margin-top: 40px;
@@ -405,13 +419,32 @@ def landing_page():
             </div>
 
             <div class="section">
+                <h2>Authentication</h2>
+                <p>
+                    All <code>/api/v1/*</code> endpoints require a Bearer token. Include your
+                    token in the <code>Authorization</code> header on every request:
+                </p>
+                <div class="api-endpoint">Authorization: Bearer wof_&lt;your-token&gt;</div>
+                <div class="auth-banner">
+                    Need a token? Tokens are issued through the
+                    <a href="/admin">admin page</a> (password-protected). Each token's
+                    usage is tracked and tokens can be revoked at any time.
+                </div>
+                <p style="color: #7f8c8d; font-size: 0.95em;">
+                    The <code>/health</code> endpoint and this landing page remain public.
+                    Requests without a valid token return <code>401 Unauthorized</code>.
+                </p>
+            </div>
+
+            <div class="section">
                 <h2>API Endpoints</h2>
 
                 <h3 style="margin-top: 20px;">Get Geographic Hierarchy</h3>
                 <div class="api-endpoint">GET /api/v1/hierarchy?lat={latitude}&lon={longitude}</div>
                 <div class="example">
                     <strong>Example:</strong><br>
-                    <code>/api/v1/hierarchy?lat=37.7749&lon=-122.4194</code><br>
+                    <code>curl -H "Authorization: Bearer wof_..." \\<br>
+                    &nbsp;&nbsp;"/api/v1/hierarchy?lat=37.7749&amp;lon=-122.4194"</code><br>
                     <span style="color: #7f8c8d;">Returns: continent, country, region, county, locality, and neighbourhood</span>
                 </div>
 
@@ -419,11 +452,11 @@ def landing_page():
                 <div class="api-endpoint">GET /api/v1/place/{wof_id}</div>
                 <div class="example">
                     <strong>Example:</strong><br>
-                    <code>/api/v1/place/85922583</code><br>
+                    <code>curl -H "Authorization: Bearer wof_..." /api/v1/place/85922583</code><br>
                     <span style="color: #7f8c8d;">Returns: Complete place details with properties and hierarchy</span>
                 </div>
 
-                <h3 style="margin-top: 20px;">Health Check</h3>
+                <h3 style="margin-top: 20px;">Health Check (no auth)</h3>
                 <div class="api-endpoint">GET /health</div>
             </div>
 
