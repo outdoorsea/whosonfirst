@@ -1,10 +1,14 @@
 import os
+import secrets
+import hashlib
 import logging
+import html as html_lib
 from contextlib import asynccontextmanager
 from typing import Optional
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request, Form, status
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import psycopg2
 from psycopg2 import pool
@@ -26,8 +30,39 @@ DB_PASS = os.getenv("DB_PASS", "password")
 DB_MIN_CONNECTIONS = int(os.getenv("DB_MIN_CONNECTIONS", "1"))
 DB_MAX_CONNECTIONS = int(os.getenv("DB_MAX_CONNECTIONS", "10"))
 
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+
+TOKEN_PREFIX = "wof_"
+
 # Global connection pool
 connection_pool = None
+
+
+AUTH_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    token_prefix TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revoked_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS api_token_usage (
+    id BIGSERIAL PRIMARY KEY,
+    token_id INTEGER NOT NULL REFERENCES api_tokens(id) ON DELETE CASCADE,
+    endpoint TEXT NOT NULL,
+    called_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_token_usage_token_id ON api_token_usage(token_id);
+CREATE INDEX IF NOT EXISTS idx_token_usage_called_at ON api_token_usage(called_at DESC);
+"""
+
+
+def hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 @asynccontextmanager
@@ -53,15 +88,21 @@ async def lifespan(app: FastAPI):
         )
         logger.info(f"Connection pool created: {DB_MIN_CONNECTIONS}-{DB_MAX_CONNECTIONS} connections")
 
-        # Test connection
+        # Test connection and bootstrap auth schema
         conn = connection_pool.getconn()
         try:
             cursor = conn.cursor()
             cursor.execute("SELECT 1;")
             logger.info("Database connection test successful")
+            cursor.execute(AUTH_SCHEMA_SQL)
+            conn.commit()
+            logger.info("Auth schema verified")
             cursor.close()
         finally:
             connection_pool.putconn(conn)
+
+        if not ADMIN_PASSWORD:
+            logger.warning("ADMIN_PASSWORD is not set — /admin will reject all requests")
 
     except Exception as e:
         logger.error(f"Failed to create connection pool: {e}")
@@ -98,6 +139,81 @@ def get_db_connection():
     except Exception as e:
         logger.error(f"Database connection error: {e}")
         raise HTTPException(status_code=503, detail=f"Database connection failed: {str(e)}")
+
+# --- Authentication ---
+bearer_scheme = HTTPBearer(auto_error=False)
+basic_scheme = HTTPBasic(auto_error=False)
+
+
+def require_token(
+    request: Request,
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+) -> int:
+    """Validate Bearer token, log usage, return token id."""
+    if creds is None or creds.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid Authorization header. Expected: Bearer <token>",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token_hash = hash_token(creds.credentials)
+
+    if not connection_pool:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    conn = connection_pool.getconn()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM api_tokens WHERE token_hash = %s AND revoked_at IS NULL",
+            (token_hash,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            cursor.close()
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or revoked token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        token_id = row['id']
+        cursor.execute(
+            "INSERT INTO api_token_usage (token_id, endpoint) VALUES (%s, %s)",
+            (token_id, request.url.path),
+        )
+        conn.commit()
+        cursor.close()
+        return token_id
+    finally:
+        connection_pool.putconn(conn)
+
+
+def require_admin(
+    creds: Optional[HTTPBasicCredentials] = Depends(basic_scheme),
+) -> str:
+    """HTTP Basic auth gate for /admin."""
+    if not ADMIN_PASSWORD:
+        raise HTTPException(
+            status_code=503,
+            detail="Admin disabled: ADMIN_PASSWORD environment variable not set",
+        )
+    if creds is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": 'Basic realm="admin"'},
+        )
+    user_ok = secrets.compare_digest(creds.username, ADMIN_USERNAME)
+    pass_ok = secrets.compare_digest(creds.password, ADMIN_PASSWORD)
+    if not (user_ok and pass_ok):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": 'Basic realm="admin"'},
+        )
+    return creds.username
+
 
 # --- Pydantic Models for API Schema ---
 class WOFRecord(BaseModel):
@@ -340,7 +456,12 @@ def landing_page():
     """
 
 @app.get("/api/v1/hierarchy", response_model=HierarchyResponse)
-def get_hierarchy_by_coords(lat: float, lon: float, db=Depends(get_db_connection)):
+def get_hierarchy_by_coords(
+    lat: float,
+    lon: float,
+    db=Depends(get_db_connection),
+    _token_id: int = Depends(require_token),
+):
     """
     Resolves geographic coordinates to their corresponding Who's on First (WOF) hierarchy.
 
@@ -518,7 +639,11 @@ def health_check():
 
 
 @app.get("/api/v1/place/{wof_id}")
-def get_place_by_id(wof_id: int, db=Depends(get_db_connection)):
+def get_place_by_id(
+    wof_id: int,
+    db=Depends(get_db_connection),
+    _token_id: int = Depends(require_token),
+):
     """
     Retrieve a WOF place by its ID.
     """
@@ -556,6 +681,212 @@ def get_place_by_id(wof_id: int, db=Depends(get_db_connection)):
             cursor.close()
         if db and connection_pool:
             connection_pool.putconn(db)
+
+# --- Admin: token management ---
+
+def _fetch_tokens(cursor):
+    cursor.execute("""
+        SELECT t.id, t.name, t.token_prefix, t.created_at, t.revoked_at,
+               COUNT(u.id) AS call_count,
+               MAX(u.called_at) AS last_called_at
+        FROM api_tokens t
+        LEFT JOIN api_token_usage u ON u.token_id = t.id
+        GROUP BY t.id
+        ORDER BY t.created_at DESC;
+    """)
+    return cursor.fetchall()
+
+
+def _render_admin_html(tokens, new_token: Optional[str] = None, message: Optional[str] = None) -> str:
+    new_banner = ""
+    if new_token:
+        new_banner = f"""
+        <div class="banner success">
+            <strong>New token created — copy it now, it will not be shown again:</strong>
+            <pre class="token-display">{html_lib.escape(new_token)}</pre>
+        </div>
+        """
+    msg_banner = ""
+    if message:
+        msg_banner = f'<div class="banner info">{html_lib.escape(message)}</div>'
+
+    rows = []
+    for t in tokens:
+        status_label = "revoked" if t["revoked_at"] else "active"
+        last_called = t["last_called_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if t["last_called_at"] else "—"
+        created = t["created_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if t["created_at"] else "—"
+        revoke_cell = ""
+        if not t["revoked_at"]:
+            revoke_cell = f"""
+            <form method="post" action="/admin/tokens/{t['id']}/revoke" onsubmit="return confirm('Revoke token \\'{html_lib.escape(t['name'])}\\'? This cannot be undone.');">
+                <button type="submit" class="btn-danger">Revoke</button>
+            </form>
+            """
+        rows.append(f"""
+            <tr class="{'revoked' if t['revoked_at'] else ''}">
+                <td>{html_lib.escape(t['name'])}</td>
+                <td><code>{html_lib.escape(t['token_prefix'])}…</code></td>
+                <td><span class="status status-{status_label}">{status_label}</span></td>
+                <td>{t['call_count']}</td>
+                <td>{last_called}</td>
+                <td>{created}</td>
+                <td>{revoke_cell}</td>
+            </tr>
+        """)
+    rows_html = "\n".join(rows) if rows else '<tr><td colspan="7" class="empty">No tokens yet — create one below.</td></tr>'
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WOF API — Admin</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32x32.png">
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                line-height: 1.5; color: #333; background: #f5f5f5; }}
+        .container {{ max-width: 1100px; margin: 0 auto; padding: 30px 20px; }}
+        header {{ background: white; padding: 24px 30px; border-radius: 8px;
+                  box-shadow: 0 2px 4px rgba(0,0,0,0.08); margin-bottom: 20px;
+                  display: flex; justify-content: space-between; align-items: center; }}
+        h1 {{ color: #2c3e50; font-size: 1.6em; }}
+        h2 {{ color: #34495e; font-size: 1.2em; margin-bottom: 16px; }}
+        .section {{ background: white; padding: 24px 30px; border-radius: 8px;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.08); margin-bottom: 20px; }}
+        table {{ width: 100%; border-collapse: collapse; }}
+        th, td {{ text-align: left; padding: 10px 12px; border-bottom: 1px solid #ecf0f1; }}
+        th {{ background: #f8f9fa; font-weight: 600; color: #555; font-size: 0.9em; }}
+        tr.revoked {{ color: #999; }}
+        td.empty {{ text-align: center; color: #999; padding: 30px; }}
+        code {{ font-family: 'SF Mono', Menlo, monospace; font-size: 0.9em;
+                background: #ecf0f1; padding: 2px 6px; border-radius: 3px; }}
+        .status {{ display: inline-block; padding: 2px 8px; border-radius: 10px;
+                   font-size: 0.8em; font-weight: 500; }}
+        .status-active {{ background: #d4edda; color: #155724; }}
+        .status-revoked {{ background: #f8d7da; color: #721c24; }}
+        form.inline {{ display: flex; gap: 10px; align-items: center; }}
+        input[type=text] {{ padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px;
+                            font-size: 1em; flex: 1; max-width: 320px; }}
+        button {{ padding: 8px 16px; border: none; border-radius: 4px;
+                  font-size: 0.95em; cursor: pointer; font-weight: 500; }}
+        button[type=submit]:not(.btn-danger) {{ background: #3498db; color: white; }}
+        button[type=submit]:not(.btn-danger):hover {{ background: #2980b9; }}
+        .btn-danger {{ background: #e74c3c; color: white; }}
+        .btn-danger:hover {{ background: #c0392b; }}
+        .banner {{ padding: 16px 20px; border-radius: 6px; margin-bottom: 20px; }}
+        .banner.success {{ background: #fff3cd; border: 1px solid #ffeaa7; color: #856404; }}
+        .banner.info {{ background: #d1ecf1; border: 1px solid #bee5eb; color: #0c5460; }}
+        .token-display {{ background: #2c3e50; color: #ecf0f1; padding: 12px 14px;
+                          border-radius: 4px; font-family: 'SF Mono', Menlo, monospace;
+                          margin-top: 10px; word-break: break-all; }}
+        .hint {{ color: #7f8c8d; font-size: 0.9em; margin-top: 8px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>API Token Admin</h1>
+            <a href="/">← Back to landing</a>
+        </header>
+
+        {new_banner}
+        {msg_banner}
+
+        <div class="section">
+            <h2>Tokens</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Prefix</th>
+                        <th>Status</th>
+                        <th>Calls</th>
+                        <th>Last used</th>
+                        <th>Created</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows_html}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section">
+            <h2>Create new token</h2>
+            <form method="post" action="/admin/tokens" class="inline">
+                <input type="text" name="name" placeholder="Token name (e.g. mobile-app)" required maxlength="100">
+                <button type="submit">Create token</button>
+            </form>
+            <p class="hint">The full token will be shown once after creation. Store it somewhere safe.</p>
+        </div>
+    </div>
+</body>
+</html>"""
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_page(_user: str = Depends(require_admin)):
+    if not connection_pool:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    conn = connection_pool.getconn()
+    try:
+        cursor = conn.cursor()
+        tokens = _fetch_tokens(cursor)
+        cursor.close()
+        return _render_admin_html(tokens)
+    finally:
+        connection_pool.putconn(conn)
+
+
+@app.post("/admin/tokens", response_class=HTMLResponse)
+def admin_create_token(name: str = Form(...), _user: str = Depends(require_admin)):
+    name = name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+    if len(name) > 100:
+        raise HTTPException(status_code=400, detail="Name too long (max 100 chars)")
+
+    if not connection_pool:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    raw = secrets.token_urlsafe(32)
+    plaintext = f"{TOKEN_PREFIX}{raw}"
+    token_hash = hash_token(plaintext)
+    token_prefix = plaintext[:12]
+
+    conn = connection_pool.getconn()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO api_tokens (name, token_hash, token_prefix) VALUES (%s, %s, %s)",
+            (name, token_hash, token_prefix),
+        )
+        conn.commit()
+        tokens = _fetch_tokens(cursor)
+        cursor.close()
+        return _render_admin_html(tokens, new_token=plaintext)
+    finally:
+        connection_pool.putconn(conn)
+
+
+@app.post("/admin/tokens/{token_id}/revoke")
+def admin_revoke_token(token_id: int, _user: str = Depends(require_admin)):
+    if not connection_pool:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    conn = connection_pool.getconn()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE api_tokens SET revoked_at = NOW() WHERE id = %s AND revoked_at IS NULL",
+            (token_id,),
+        )
+        conn.commit()
+        cursor.close()
+    finally:
+        connection_pool.putconn(conn)
+    return RedirectResponse(url="/admin", status_code=status.HTTP_303_SEE_OTHER)
+
 
 # To run this application:
 # 1. Install dependencies: pip install -r requirements.txt

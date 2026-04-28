@@ -18,6 +18,27 @@ FastAPI provides interactive API documentation:
 
 ---
 
+## Authentication
+
+All `/api/v1/*` endpoints require a Bearer token in the `Authorization` header:
+
+```bash
+curl -H "Authorization: Bearer wof_<your-token>" \
+  "http://localhost:2000/api/v1/hierarchy?lat=37.7749&lon=-122.4194"
+```
+
+Tokens are issued via the admin page at `/admin` (HTTP Basic auth, configured
+with `ADMIN_USERNAME` / `ADMIN_PASSWORD` env vars). The admin page lists all
+tokens with usage counts and lets you create or revoke tokens. A token's
+plaintext value is shown only once at creation time — only its sha256 hash is
+stored.
+
+The `/health` and `/` endpoints remain public.
+
+Auth failures return `401 Unauthorized` with `WWW-Authenticate: Bearer`.
+
+---
+
 ## Endpoints
 
 ### 1. Get Geographic Hierarchy by Coordinates
