@@ -41,7 +41,7 @@ DB_CONFIG = {
 }
 
 # WOF Distribution URLs
-WOF_DIST_BASE = "https://data.geocode.earth/wof/dist/"
+WOF_DIST_BASE = "https://data.geocode.earth/wof/dist/sqlite/"
 
 # Common placetypes to import
 PLACETYPE_PRIORITY = [
