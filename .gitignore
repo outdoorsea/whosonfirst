@@ -80,3 +80,8 @@ archive/
 .beads/dolt-server.port
 .repo.git/
 .land-worktree/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
